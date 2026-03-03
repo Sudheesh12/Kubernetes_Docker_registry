@@ -1,16 +1,9 @@
-variable "vpc_name" {}
+variable "role_name" {}
+  
+variable "oidc_provider" {}
 
-variable "cidr" {}
-
-variable "azs" {
+variable "role_policy_arns" {
   type = list(string)
-}
-variable "private_subnets" {
-    type = list(string)
-}
-
-variable "public_subnets" {
-    type = list(string)
 }
 
 variable "comman_tags" {
@@ -22,4 +15,3 @@ variable "comman_tags" {
     trial = "test"
     }
 }
-
