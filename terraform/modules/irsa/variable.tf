@@ -2,7 +2,7 @@ variable "role_name" {}
   
 variable "oidc_provider" {}
 
-variable "role_policy_arns" {
+variable "policy_arns" {
   type = list(string)
 }
 
@@ -15,3 +15,5 @@ variable "comman_tags" {
     trial = "test"
     }
 }
+
+
