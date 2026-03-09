@@ -35,3 +35,10 @@ override.tf.json
 # Ignore CLI configuration files
 .terraformrc
 terraform.rc
+
+
+# Ignore AWS CLI v2 installer binaries anywhere under terraform
+**/awscliv2.zip
+**/awscliv2.sig
+**/aws/install
+**/aws/dist
