@@ -52,3 +52,19 @@ resource "aws_iam_role_policy_attachment" "node_policies" {
   role       = aws_iam_role.nodes.name
   policy_arn = each.value
 }
+
+
+# ── ALB controller IAM Policy ───────────────────────────────
+
+resource "aws_iam_policy" "alb_controller" {
+  name        = "${var.cluster_name}-alb-controller-policy"
+  description = "ALB controller IAM Policy"
+  policy      = file("${path.module}/alb-iam-policy.json")
+  tags = var.tags
+}
+  
+
+resource "aws_iam_role_policy_attachment" "alb_controller" {
+  role       = aws_iam_role.nodes.name
+  policy_arn = aws_iam_policy.alb_controller.arn
+}

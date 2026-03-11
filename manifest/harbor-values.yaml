@@ -1,0 +1,73 @@
+expose:
+  type: ingress
+  tls:
+    enabled: true
+    certSource: secret
+    secret:
+      secretName: harbor-tls
+  ingress:
+    controller: nginx
+    className: "nginx"
+    hosts:
+      core: harbor.sudheeshbalakrishna.in
+    annotations:
+      cert-manager.io/cluster-issuer: "letsencrypt-prod"
+      nginx.ingress.kubernetes.io/proxy-body-size: "0"
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+
+
+externalURL: https://harbor.sudheeshbalakrishna.in
+
+# Basic auth — no OIDC yet
+# You login with admin / harborAdminPassword
+
+auth:
+  mode: "db"
+
+
+persistence:
+  enabled: true
+  resourcePolicy: "keep"
+  persistentVolumeClaim:
+    registry: 
+      storageClass: "gp3"
+      accessMode: "ReadWriteOnce"
+      size: "10Gi"
+    jobservice: 
+      storageClass: "gp3"
+      accessMode: "ReadWriteOnce"
+      size: "1Gi"
+    database: 
+      storageClass: "gp3"
+      accessMode: "ReadWriteOnce"
+      size: "2Gi"
+    redis: 
+      storageClass: "gp3"
+      accessMode: "ReadWriteOnce"
+      size: "1Gi"
+    trivy: 
+      storageClass: "gp3"
+      accessMode: "ReadWriteOnce"
+      size: "5Gi"
+      
+
+portal:
+  replicas: 2
+
+core:
+  replicas: 2
+
+registry:
+  replicas: 2
+  storage:
+    filesystem:
+      rootdirectory: /var/lib/registry
+
+trivy:
+  enabled: true
+
+updateStrategy:
+  type: "RollingUpdate"
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1

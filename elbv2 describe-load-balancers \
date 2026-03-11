@@ -1,0 +1,44 @@
+{
+    "NatGateways": [
+        {
+            "CreateTime": "2026-03-10T06:23:50+00:00",
+            "DeleteTime": "2026-03-10T08:15:37+00:00",
+            "NatGatewayAddresses": [
+                {
+                    "AllocationId": "eipalloc-0a6b895940d0d78b8",
+                    "NetworkInterfaceId": "eni-0c66b307ce57bf2fc",
+                    "PrivateIp": "10.0.1.240",
+                    "PublicIp": "44.194.79.177",
+                    "AssociationId": "eipassoc-00c342e4015f3f854",
+                    "IsPrimary": true,
+                    "Status": "succeeded"
+                }
+            ],
+            "NatGatewayId": "nat-0b5c43716921cad14",
+            "State": "deleted",
+            "SubnetId": "subnet-0c58fd16f694229de",
+            "VpcId": "vpc-09ae1252c28416c32",
+            "Tags": [
+                {
+                    "Key": "Project",
+                    "Value": "40daysofkubernetes"
+                },
+                {
+                    "Key": "Environment",
+                    "Value": "dev"
+                },
+                {
+                    "Key": "ManagedBy",
+                    "Value": "terraform"
+                },
+                {
+                    "Key": "Name",
+                    "Value": "40daysofkubernetes-vpc-us-east-1a"
+                }
+            ],
+            "ConnectivityType": "public",
+            "AvailabilityMode": "zonal",
+            "AttachedAppliances": []
+        }
+    ]
+}
