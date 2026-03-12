@@ -55,6 +55,7 @@ helm repo update
 helm install cert-manager jetstack/cert-manager \
   --namespace cert-manager \
   --create-namespace \
+  --version v1.14.5 \
   --set installCRDs=true
 
 # Wait a minute for pods to be ready, then apply your cluster issuer:
@@ -63,6 +64,8 @@ kubectl apply -f manifest/clusterissuer.yaml
 
 ### 4. Deploy NGINX Ingress Controller
 This provisions the AWS Network Load Balancer (NLB) and handles all incoming HTTP/HTTPS traffic routing.
+
+The extra `--set controller.metrics.enabled=true` flag tells the NGINX pod to expose a `/metrics` HTTP endpoint on port 10254. Prometheus will scrape this to track HTTP request rates, error rates, and latency through your ingress.
 ```bash
 helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
 helm repo update
@@ -70,10 +73,60 @@ helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
   --namespace ingress-nginx \
   --create-namespace \
   --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"=nlb \
-  --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-scheme"=internet-facing
+  --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-scheme"=internet-facing \
+  --set controller.metrics.enabled=true \
+  --set controller.metrics.serviceMonitor.enabled=true \
+  --set controller.metrics.serviceMonitor.namespace=monitoring
 ```
 
-### 5. Deploy Harbor
+### 5. Deploy Dex (OIDC Provider)
+Dex acts as the middleman for GitHub OAuth authentication. **Before deploying**, ensure you have updated `manifest/dex-values.yaml` with your GitHub OAuth App's `clientID` and `clientSecret`.
+
+```bash
+helm repo add dex https://charts.dexidp.io
+helm repo update
+
+helm upgrade --install dex dex/dex \
+  --namespace dex \
+  --create-namespace \
+  -f manifest/dex-values.yaml
+```
+
+### 6. Deploy Monitoring Stack (Prometheus + Grafana)
+
+This installs the `kube-prometheus-stack` Helm chart, which bundles:
+- **Prometheus** — scrapes and stores metrics from your entire cluster
+- **Grafana** — the web dashboard UI at `https://grafana.sudheeshbalakrishna.in`
+- **Node Exporter** — OS-level metrics (CPU/RAM/disk) from each EC2 node
+- **kube-state-metrics** — Kubernetes object metrics (pod restarts, replica counts)
+- **AlertManager** — alert routing (installed but unconfigured)
+
+All config is in `manifest/prometheus-stack-values.yaml`.
+
+```bash
+# Add the Prometheus Community Helm repo
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+
+# Install the full monitoring bundle into its own namespace
+helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+  --namespace monitoring \
+  --create-namespace \
+  --version 58.5.3 \
+  -f manifest/prometheus-stack-values.yaml
+```
+
+> **Why version 58.5.3?** This pins the chart to a tested, stable release.
+> You can check for newer versions with `helm search repo prometheus-community/kube-prometheus-stack`.
+
+Verify the monitoring pods are all Running (may take 2-3 minutes):
+```bash
+kubectl get pods -n monitoring
+```
+
+---
+
+### 7. Deploy Harbor
 Deploy the Harbor registry using your provided values file.
 ```bash
 # Create the namespace if it doesn't exist
@@ -86,19 +139,73 @@ helm install harbor harbor/harbor \
   --namespace registryproject \
   --version 1.14.0 \
   --timeout 10m \
-  -f manifest/harbor-values.yaml
+  --set harborAdminPassword="Sudheesh12345!" \
+  -f harbor-values.yaml
 ```
 
-### 6. Update DNS Records
-Once Harbor is deployed, you must map the NGINX Load Balancer's DNS name to your custom domain.
+### 8. Update DNS Records
+Once all services are deployed, map the NGINX Load Balancer's DNS name to your custom domains.
 1. Get the NLB address:
    ```bash
    kubectl get svc ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
    ```
 2. Go to your DNS provider (e.g., Route 53 or GoDaddy).
-3. Create a **CNAME** or **ALIAS** record for `harbor.sudheeshbalakrishna.in` pointing to the NLB hostname retrieved in the previous step.
+3. Create three **CNAME** or **ALIAS** records pointing to the NLB hostname retrieved in the previous step:
+   - `harbor.sudheeshbalakrishna.in`
+   - `dex.sudheeshbalakrishna.in`
+   - `grafana.sudheeshbalakrishna.in` ← **new**
 
-Wait roughly 5-10 minutes for DNS propagation and for `cert-manager` to issue the certificate. You can then access Harbor at `https://harbor.sudheeshbalakrishna.in`.
+Wait roughly 5-10 minutes for DNS propagation and for `cert-manager` to issue the certificates.
+- Harbor: `https://harbor.sudheeshbalakrishna.in` (log in via OIDC)
+- Grafana: `https://grafana.sudheeshbalakrishna.in` (log in with `admin` / `GrafanaAdmin123!`)
+
+### 8. Troubleshooting Certificate Issues (cert-manager)
+If the certificate is not issued or you get a TLS warning in your browser, you can use these commands to debug `cert-manager`:
+
+1. **Check the status of the Certificate:**
+   ```bash
+   kubectl get certificate harbor-tls -n registryproject
+   kubectl describe certificate harbor-tls -n registryproject
+   ```
+   *(Look at the "Events" or "Conditions" at the bottom of the describe output to see if it's Ready)*
+
+2. **Check the Certificate Request (Order):**
+   ```bash
+   kubectl get orders -n registryproject
+   kubectl describe order <order-name> -n registryproject
+   ```
+
+3. **Check the ACME Challenge (DNS/HTTP-01 Validation):**
+   ```bash
+   kubectl get challenges -n registryproject
+   kubectl describe challenge <challenge-name> -n registryproject
+   ```
+   *(If a challenge is stuck in "Pending", it usually means Let's Encrypt cannot verify your domain ownership. Check your DNS records or Ingress rules!)*
+
+4. **View cert-manager Controller Logs:**
+   ```bash
+   kubectl logs -l app=cert-manager -n cert-manager --tail=100
+   ```
+   *(This shows raw errors from the cert-manager component trying to generate the cert)*
+
+5. **Verify the TLS Secret was created:**
+   ```bash
+   kubectl get secret harbor-tls -n registryproject
+   ```
+
+### 9. Docker CLI Authentication with OIDC
+When OIDC is enabled, you cannot use your GitHub password directly in the Docker CLI. Instead, Harbor generates a specific CLI secret for authenticated users.
+
+1. **Log into the Harbor Web UI** via your browser (using the "LOG IN VIA OIDC" button).
+2. Click your user profile name in the top-right corner of the Harbor interface.
+3. Select **User Profile**.
+4. Click the **copy icon** next to your **CLI secret**.
+5. Log into Harbor from your terminal using the CLI secret as your password:
+   ```bash
+   docker login harbor.sudheeshbalakrishna.in -u <your-oidc-username>
+   # Paste your CLI secret when prompted for the password
+   ```
+*(Note: You do not need to enable Device Flow on your GitHub OAuth App; it is completely bypassed by Harbor's CLI secret mechanism.)*
 
 ---
 
@@ -106,7 +213,16 @@ Wait roughly 5-10 minutes for DNS propagation and for `cert-manager` to issue th
 
 If you need to tear down the environment to stop incurring costs, run the following commands in order. **Do not just run `terraform destroy` immediately, as Kubernetes PVCs and Load Balancers created by Helm charts can prevent Terraform from cleanly destroying the VPC and subnets.**
 
-### 1. Uninstall Harbor and Delete PVCs
+### 1. Uninstall Monitoring Stack and Delete PVCs
+```bash
+helm uninstall kube-prometheus-stack -n monitoring
+# Delete PVCs so the AWS EBS volumes (Prometheus TSDB + Grafana DB) are also removed.
+# If you skip this, Terraform will hang trying to delete the VPC.
+kubectl delete pvc --all -n monitoring
+kubectl delete namespace monitoring
+```
+
+### 2. Uninstall Harbor and Delete PVCs
 ```bash
 helm uninstall harbor -n registryproject
 # CRITICAL: Delete the Persistent Volume Claims so the underlying AWS EBS volumes are destroyed. 
@@ -114,25 +230,26 @@ helm uninstall harbor -n registryproject
 kubectl delete pvc --all -n registryproject
 ```
 
-### 2. Uninstall NGINX Ingress Controller
+### 3. Uninstall NGINX Ingress Controller
 ```bash
 helm uninstall ingress-nginx -n ingress-nginx
 # This ensures the AWS Network Load Balancer (NLB) is deleted
 kubectl delete namespace ingress-nginx
 ```
 
-### 3. Uninstall Cert-Manager
+### 4. Uninstall Cert-Manager
 ```bash
 helm uninstall cert-manager -n cert-manager
 kubectl delete namespace cert-manager
 ```
 
-### 4. Delete Harbor Namespace
+### 5. Delete Remaining Namespaces
 ```bash
 kubectl delete namespace registryproject
+kubectl delete namespace dex
 ```
 
-### 5. Destroy Terraform Infrastructure
+### 6. Destroy Terraform Infrastructure
 Now that the cluster-managed resources (NLBs, EBS volumes) are cleaned up, it is safe to destroy the AWS infrastructure.
 ```bash
 cd terraform/

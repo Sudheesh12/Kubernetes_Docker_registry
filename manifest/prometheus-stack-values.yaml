@@ -1,0 +1,212 @@
+# =============================================================================
+#  KUBE-PROMETHEUS-STACK VALUES
+#  Chart: prometheus-community/kube-prometheus-stack
+#
+#  This single file configures the ENTIRE monitoring bundle:
+#    - Grafana      → the dashboard / visualisation UI
+#    - Prometheus   → metric scraper & time-series database
+#    - Node Exporter → OS-level metrics (CPU, RAM, disk) from every EC2 node
+#    - kube-state-metrics → Kubernetes object metrics (pod counts, restarts…)
+#    - AlertManager → alert routing (installed but not configured yet)
+# =============================================================================
+
+
+# =============================================================================
+# SECTION 1: GRAFANA
+# Think of Grafana as the "big screen control room dashboard" that draws
+# graphs from the data Prometheus collects.
+# =============================================================================
+grafana:
+
+  # ── Admin credentials ───────────────────────────────────────────────────────
+  # This is the password for the built-in superuser account called "admin".
+  # You will use it to log into https://grafana.sudheeshbalakrishna.in
+  # Change this to something strong before deploying to production.
+  adminPassword: "GrafanaAdmin123!"
+
+  # ── grafana.ini: Grafana's internal config file ──────────────────────────────
+  # Grafana has an INI-style config file. This section lets you override
+  # individual [section] key = value entries through Helm values.
+  grafana.ini:
+    server:
+      # domain: The public hostname Grafana is served from.
+      # Used for building correct redirect URLs (e.g. for OAuth).
+      domain: grafana.sudheeshbalakrishna.in
+
+      # root_url: The full public URL including the scheme (https://).
+      # Without this, Grafana generates broken links in emails & OAuth callbacks.
+      root_url: https://grafana.sudheeshbalakrishna.in
+
+  # ── Kubernetes Ingress ───────────────────────────────────────────────────────
+  # An Ingress is a Kubernetes resource that says:
+  #   "When a request comes in for host X at path Y, route it to pod Z."
+  # Your NGINX Ingress Controller watches all Ingress objects and programs
+  # NGINX accordingly.  cert-manager automatically requests a Let's Encrypt
+  # certificate for every host listed in the tls section.
+  ingress:
+    # enabled: true → create the Ingress resource. If false, Grafana is only
+    # accessible inside the cluster (no external traffic).
+    enabled: true
+
+    # ingressClassName: tells Kubernetes WHICH ingress controller should handle
+    # this Ingress. You have nginx installed — matching the controller's class.
+    ingressClassName: nginx
+
+    annotations:
+      # cert-manager reads this annotation and automatically provisions an
+      # SSL certificate from Let's Encrypt using the "letsencrypt-prod" issuer
+      # you defined in manifest/clusterissuer.yaml.
+      # This is identical to what Harbor and Dex already use.
+      cert-manager.io/cluster-issuer: "letsencrypt-prod"
+
+      # Force HTTPS: if someone opens http://grafana.… they are redirected to https://
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+
+    hosts:
+      # The DNS name Grafana will be accessible at.
+      # You must create a CNAME record pointing this to your NLB hostname.
+      - grafana.sudheeshbalakrishna.in
+
+    tls:
+      - secretName: grafana-tls   # cert-manager will create this Kubernetes Secret
+                                  # containing the TLS certificate & private key.
+        hosts:
+          - grafana.sudheeshbalakrishna.in
+
+  # ── Persistent Storage ───────────────────────────────────────────────────────
+  # Grafana stores its configuration (dashboards you create/import, users,
+  # data-source connections) in an embedded SQLite database inside the pod.
+  # Without persistence, all of that is lost every time the pod restarts.
+  persistence:
+    enabled: true
+
+    # storageClassName: which AWS storage driver to use.
+    # gp3 is the modern AWS EBS SSD type — same as Harbor uses for its PVCs.
+    storageClassName: gp3
+
+    # size: how big the EBS volume should be.
+    # 5Gi is more than enough for Grafana's SQLite DB + dashboard JSON files.
+    size: 5Gi
+
+    # accessModes:
+    # ReadWriteOnce = the volume can only be mounted by ONE pod at a time.
+    # This is fine because Grafana runs as a single replica.
+    accessModes:
+      - ReadWriteOnce
+
+  # ── Sidecar Containers (Dashboard & DataSource auto-discovery) ───────────────
+  # Grafana's Helm chart ships with optional "sidecar" containers — small helper
+  # containers that run alongside Grafana in the same pod.
+  #
+  # The sidecar watches Kubernetes ConfigMaps and Secrets across all namespaces.
+  # When it finds one labelled `grafana_dashboard: "1"`, it reads the JSON inside
+  # and tells Grafana to load that dashboard — no Grafana restart required.
+  # The kube-prometheus-stack chart ships with pre-built dashboards this way.
+  sidecar:
+    dashboards:
+      # enabled: true → auto-load community dashboards bundled with this chart
+      # (Kubernetes nodes, pods, NGINX, etc.) from labelled ConfigMaps.
+      enabled: true
+
+      # searchNamespace: ALL → look for dashboard ConfigMaps in every namespace,
+      # not just the monitoring namespace.
+      searchNamespace: ALL
+
+    datasources:
+      # enabled: true → auto-configure the Prometheus data source inside Grafana
+      # so you don't have to manually enter the Prometheus URL after install.
+      enabled: true
+
+
+# =============================================================================
+# SECTION 2: PROMETHEUS
+# Think of Prometheus as the "security guard who walks every room every 15
+# seconds with a clipboard, writing down everything he sees".
+# It scrapes (HTTP GET) a /metrics endpoint on every app and stores the
+# numbers in its own time-series database (TSDB on disk).
+# =============================================================================
+prometheus:
+  prometheusSpec:
+
+    # retention: How long to keep metric data before automatically deleting it.
+    # "30d" = 30 days.  Longer retention → more disk space used.
+    # For a home/learning project 15d is fine; 30d gives better historical graphs.
+    retention: 30d
+
+    # storageSpec: Prometheus's TSDB is HDD-intensive (constant writes).
+    # We give it its own EBS volume so data survives pod restarts.
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp3          # AWS EBS gp3 SSD
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              # storage: Prometheus stores raw metric samples.
+              # 20Gi is generous for a small cluster; scale up if you start hitting limits.
+              # (Harbor's registry is 10Gi; Prometheus data is much lighter per GB.)
+              storage: 20Gi
+
+    # ── ServiceMonitor & PodMonitor selectors ────────────────────────────────
+    # Prometheus discovers what to scrape via two CRD types:
+    #   ServiceMonitor: "scrape this Kubernetes Service's /metrics endpoint"
+    #   PodMonitor:     "scrape this individual Pod's /metrics endpoint"
+    #
+    # By default, Prometheus only watches its own namespace. Setting these
+    # selectors to {} (empty = match everything) tells it to watch ALL namespaces.
+    # This is how it discovers Harbor in `registryproject`, NGINX in `ingress-nginx`, etc.
+    serviceMonitorNamespaceSelector: {}   # {} = no namespace filter = ALL namespaces
+    serviceMonitorSelector: {}            # {} = no label filter    = ALL ServiceMonitors
+    podMonitorNamespaceSelector: {}
+    podMonitorSelector: {}
+
+    # ruleNamespaceSelector: Same idea but for PrometheusRule objects
+    # (these define alerting rules like "alert if pod restarts > 5 in 10 min").
+    ruleNamespaceSelector: {}
+    ruleSelector: {}
+
+
+# =============================================================================
+# SECTION 3: NODE EXPORTER
+# Node Exporter is a small agent that runs on EVERY Kubernetes node (EC2
+# instance) as a DaemonSet (one pod per node, always).
+# It exposes CPU usage, RAM, disk I/O, network bytes — OS-level stats.
+# These power the "Node Exporter Full" Grafana dashboard.
+# =============================================================================
+nodeExporter:
+  enabled: true   # Keep this on — it's lightweight and very useful
+
+
+# =============================================================================
+# SECTION 4: KUBE-STATE-METRICS
+# kube-state-metrics (KSM) talks to the Kubernetes API server and converts
+# Kubernetes object information into Prometheus metrics.
+#
+# For example:
+#   kube_pod_container_status_restarts_total{pod="harbor-core-xxx"} 3
+#   kube_deployment_status_replicas_available{deployment="harbor-registry"} 2
+#
+# This powers the "Kubernetes / Pods" and "Kubernetes / Deployments" dashboards.
+# =============================================================================
+kubeStateMetrics:
+  enabled: true
+
+
+# =============================================================================
+# SECTION 5: ALERTMANAGER
+# AlertManager receives ALERTS from Prometheus and routes them somewhere
+# (email, Slack, PagerDuty, etc.).
+#
+# Rule: Prometheus evaluates recording/alerting rules every 15s.
+# If a rule fires (e.g. "CPU > 90% for 5 min"), it sends the alert to
+# AlertManager. AlertManager de-duplicates, groups, and routes it.
+#
+# We enable it here but leave routing unconfigured for now.
+# You can add email/Slack routing later via the alertmanager.config section.
+# =============================================================================
+alertmanager:
+  enabled: true
+
+  # Silence the "no receivers defined" warning that appears when routing is empty.
+  alertmanagerSpec:
+    alertmanagerConfigSelector: {}

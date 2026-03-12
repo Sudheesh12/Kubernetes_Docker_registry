@@ -22,7 +22,16 @@ externalURL: https://harbor.sudheeshbalakrishna.in
 # You login with admin / harborAdminPassword
 
 auth:
-  mode: "db"
+  mode: "oidc"
+  oidc:
+    name: "Dex"
+    endpoint: "https://dex.sudheeshbalakrishna.in"
+    client_id: "harbor"
+    client_secret: "harbor-dex-shared-secret"
+    scope: "openid,profile,email"
+    verify_cert: "true"
+    auto_onboard: "true"
+    user_claim: "name"
 
 
 persistence:

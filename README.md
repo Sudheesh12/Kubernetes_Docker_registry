@@ -1,118 +1,204 @@
-# Kubernetes_Docker_registry
+# 🚢 Private Docker Registry on Kubernetes (EKS + Harbor + Dex + GitHub OAuth)
 
-## File Structure:
+A production-grade, self-hosted private Docker/OCI image registry deployed on AWS EKS — with SSO authentication via GitHub OAuth, automated TLS via Let's Encrypt, image vulnerability scanning via Trivy, and infrastructure provisioned entirely through Terraform.
+
+---
+
+## 📐 Architecture Overview
+
+### High-Level Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                               AWS Cloud                                         │
+│                                                                                 │
+│   Developer / CI-CD Pipeline                                                    │
+│         │                                                                       │
+│         │  docker login / docker push                                           │
+│         ▼                                                                       │
+│   ┌─────────────────┐                                                           │
+│   │  AWS NLB        │  ← Network Load Balancer (provisioned by NGINX Ingress)   │
+│   └────────┬────────┘                                                           │
+│            │ :443 (TLS passthrough)                                             │
+│            ▼                                                                    │
+│   ┌──────────────────────────────────────────────────────────┐                  │
+│   │                     EKS Cluster                          │                  │
+│   │                                                          │                  │
+│   │  ┌─────────────────────────────────────────────────┐     │                  │
+│   │  │           NGINX Ingress Controller               │     │                  │
+│   │  │  (TLS termination using cert-manager secrets)   │     │                  │
+│   │  └──────────────┬────────────────┬─────────────────┘     │                  │
+│   │                 │                │                        │                  │
+│   │    harbor.*     │                │ dex.*                  │                  │
+│   │                 ▼                ▼                        │                  │
+│   │  ┌──────────────────┐  ┌─────────────────┐               │                  │
+│   │  │   Harbor         │  │   Dex (OIDC)    │               │                  │
+│   │  │  - Portal        │  │  - GitHub       │               │                  │
+│   │  │  - Core API      │  │    Connector    │               │                  │
+│   │  │  - Registry      │  │  - Token Issue  │               │                  │
+│   │  │  - Trivy Scanner │  └────────┬────────┘               │                  │
+│   │  │  - Job Service   │           │                        │                  │
+│   │  │  - Redis Cache   │           │ (OIDC callback)        │                  │
+│   │  │  - PostgreSQL DB │           ▼                        │                  │
+│   │  └──────────────────┘  ┌────────────────┐                │                  │
+│   │                        │  github.com    │                │                  │
+│   │  ┌──────────────────┐  │  OAuth App     │                │                  │
+│   │  │   cert-manager   │  └────────────────┘                │                  │
+│   │  │  (Let's Encrypt) │                                    │                  │
+│   │  └──────────────────┘                                    │                  │
+│   │                                                          │                  │
+│   │  ┌──────────────────┐                                    │                  │
+│   │  │   EBS CSI Driver │  ← Provisions gp3 volumes for     │                  │
+│   │  │   (gp3 volumes)  │    Harbor persistence              │                  │
+│   │  └──────────────────┘                                    │                  │
+│   └──────────────────────────────────────────────────────────┘                  │
+│                                                                                 │
+│   ┌──────────────────┐  ┌──────────────────┐                                    │
+│   │   VPC            │  │   S3 Bucket      │                                    │
+│   │  (public/private │  │  (Terraform      │                                    │
+│   │   subnets)       │  │   remote state)  │                                    │
+│   └──────────────────┘  └──────────────────┘                                    │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### GitHub OAuth / OIDC Login Flow
+
+```
+  Browser                Harbor              Dex                GitHub
+     │                     │                  │                    │
+     │── Click OIDC Login ─▶│                  │                    │
+     │                     │── Redirect ──────▶│                    │
+     │                     │                  │── OAuth Redirect ──▶│
+     │                     │                  │                    │ (User clicks Authorize)
+     │                     │                  │◀── Auth Code ──────│
+     │                     │                  │── Exchange for Token│
+     │                     │                  │   (validates with   │
+     │                     │                  │    GitHub API)      │
+     │                     │◀── OIDC Token ───│                    │
+     │◀── Logged Into Harbor│                  │                    │
+     │                     │                  │                    │
+```
+
+---
+
+### Docker CLI Push Flow (with OIDC)
+
+```
+  Developer CLI                     Harbor                    Registry Storage
+        │                              │                            │
+        │── docker login ─────────────▶│                            │
+        │   (user: OIDC username)      │                            │
+        │   (pass: Harbor CLI Secret)  │                            │
+        │◀── Login Succeeded ──────────│                            │
+        │                              │                            │
+        │── docker push image:tag ────▶│                            │
+        │                              │── Trivy Scan (if enabled) ─▶
+        │                              │                            │
+        │                              │── Store on EBS gp3 ───────▶│
+        │◀── Push Succeeded ───────────│                            │
+```
+
+---
+
+## 🗂️ Project Structure
 
 ```
 Kubernetes_Docker_registry/
-└── terraform/
-    ├── backend/
-    │     └── s3-backend.tf
-    │
-    ├── environments/
-    │     └── dev/
-    │          ├── main.tf
-    │          ├── variables.tf
-    │          ├── outputs.tf
-    │          └── terraform.tfvars
-    │
-    └── modules/
-          ├── vpc/
-          │     ├── main.tf
-          │     ├── variables.tf
-          │     └── outputs.tf
-          │
-          ├── eks/
-          │     ├── main.tf
-          │     ├── variables.tf
-          │     └── outputs.tf
-          │
-          ├── irsa/
-          │     ├── main.tf
-          │     └── variables.tf
-          │
-          ├── ebs-csi-driver/
-          │     └── main.tf
-          │
-          └── velero-backup/
-                ├── main.tf
-                └── variables.tf
-
+├── terraform/
+│   ├── backend.tf               # S3 remote state backend
+│   ├── main.tf                  # Root module (VPC, EKS, IRSA, EBS CSI)
+│   ├── variable.tf
+│   ├── terraform.tfvars
+│   └── modules/
+│       ├── vpc/                 # VPC with public/private subnets
+│       ├── eks/                 # EKS cluster + managed node groups
+│       ├── irsa/                # IAM Roles for Service Accounts
+│       ├── ebs-csi-driver/      # EBS CSI Driver for persistent storage
+│       └── velero-backup/       # (Optional) Cluster backup via Velero
+│
+└── manifest/
+    ├── namespace.yaml           # registryproject namespace
+    ├── clusterissuer.yaml       # Let's Encrypt ClusterIssuer (cert-manager)
+    ├── harbor-ingress.yaml      # Harbor Ingress resource
+    ├── harbor-values.yaml       # Harbor Helm values (OIDC, TLS, storage)
+    ├── dex-values.yaml          # Dex Helm values (GitHub connector, static clients)
+    └── alb-iam-policy.json      # IAM policy for ALB controller (reference)
 ```
 
+---
 
-### Update on the project:
+## 🧰 Technology Stack
 
-#### Completed items:
- - **terraform** : 
-    - modules:
-        - VPC - done
-        - eks - working on it.
+| Layer | Technology |
+|---|---|
+| Cloud Provider | AWS |
+| Compute | EKS (Elastic Kubernetes Service) |
+| Infrastructure-as-Code | Terraform |
+| Container Registry | Harbor |
+| OIDC Identity Provider | Dex |
+| Identity Source | GitHub OAuth |
+| Ingress Controller | NGINX Ingress |
+| Load Balancer | AWS Network Load Balancer (NLB) |
+| TLS Certificates | cert-manager + Let's Encrypt |
+| Persistent Storage | AWS EBS (gp3) via EBS CSI Driver |
+| Image Vulnerability Scanning | Trivy (built into Harbor) |
+| Package Manager | Helm |
 
+---
 
+## ✨ Key Features
 
+- **Private, self-hosted OCI-compliant registry** — full control over your images, no vendor lock-in beyond AWS.
+- **GitHub SSO via OIDC** — Developers log in using their GitHub accounts through Dex (no separate passwords to manage).
+- **Automated TLS** — cert-manager automatically provisions and renews Let's Encrypt certificates for both `harbor.*` and `dex.*` domains.
+- **Image Vulnerability Scanning** — Trivy is integrated directly into Harbor to scan images on push automatically.
+- **Production-grade HA configuration** — Harbor Portal, Core, and Registry all run with multiple replicas and rolling update strategy.
+- **Persistent storage with EBS gp3** — Registry, database, cache, and Trivy all use separate gp3 EBS volumes, provisioned automatically by the EBS CSI driver.
+- **Infrastructure-as-Code** — All AWS infrastructure (VPC, EKS, IAM, nodes) is defined and managed via Terraform modules.
 
+---
 
-Dex and GitHub OAuth Integration Plan
-This plan details the approach for integrating GitHub OAuth into your Kubernetes project and Harbor registry.
+## 🚀 Quick Start
 
-Approach Overview
-Harbor natively supports OpenID Connect (OIDC) for authentication but does not natively support raw OAuth2 like GitHub provides. To bridge this gap, we will deploy Dex to your cluster. Dex is an identity service that uses OIDC to drive authentication for other apps. It acts as a middleman:
+See [infra_setup.md](./infra_setup.md) for the full step-by-step bring-up and teardown guide.
 
-When you click "Login with OIDC" in Harbor, Harbor redirects you to Dex.
-Dex redirects you to GitHub for OAuth2 authentication.
-GitHub authenticates you and returns a token to Dex.
-Dex converts this to a standard OIDC token and sends it back to Harbor.
-Harbor logs you in.
-User Review Required
-IMPORTANT
+### Prerequisites
+- AWS CLI configured with appropriate permissions
+- `kubectl`, `helm`, `terraform` installed locally
+- A registered domain with DNS management access
+- A GitHub OAuth App created at `github.com/settings/developers`
 
-To configure Dex, you must first create an OAuth application in your GitHub account to get a Client ID and Client Secret.
+### Summary of Deployment Steps
+1. `terraform apply` — Provision VPC, EKS cluster, IAM roles, EBS CSI
+2. Install `cert-manager` + apply `ClusterIssuer`
+3. Install `ingress-nginx` (provisions AWS NLB)
+4. Install `dex` with GitHub OAuth config
+5. Install `harbor` with OIDC config pointing to Dex
+6. Update DNS CNAME records to point to NLB hostname
+7. Configure Harbor Web UI → Authentication → OIDC
 
-Steps to create a GitHub OAuth App:
+---
 
-Go to your GitHub profile -> Settings -> Developer Settings -> OAuth Apps.
-Click New OAuth App.
-Application Name: Harbor Registry Dex (or similar)
-Homepage URL: https://harbor.sudheeshbalakrishna.in
-Authorization callback URL: https://dex.sudheeshbalakrishna.in/callback
-Register the application, generate a new client secret, and save both the Client ID and the Client Secret securely. Provide them to me when you are ready to proceed with the execution.
-Proposed Changes
-Configuration Files
-[NEW] 
-dex-values.yaml
-We will create a Helm values file for Dex. It will configure:
+## 🔐 CLI Authentication (OIDC)
 
-An NGINX Ingress route for dex.sudheeshbalakrishna.in via cert-manager.
-The github connector configuration (requiring your Client ID and Secret).
-A staticClients block defining Harbor as an authorized client to consume Dex tokens.
-[MODIFY] 
-harbor-values.yaml
-We will add standard OIDC configuration parameters so Harbor knows to delegate authentication to your new Dex instance:
+Since Harbor runs in OIDC mode, CLI login uses a Harbor-issued **CLI Secret** instead of your GitHub password:
 
-yaml
-auth:
-  mode: "oidc_auth"
-  oidc:
-    name: "Dex"
-    endpoint: "https://dex.sudheeshbalakrishna.in"
-    client_id: "harbor"
-    client_secret: "<a-secure-secret-shared-between-dex-and-harbor>"
-    scope: "openid,profile,email,groups"
-    verify_cert: "true"
-    auto_onboard: "true"
-    user_claim: "name"
-[MODIFY] 
-infra_setup.md
-We will add a new section in your deployment documentation indicating how to install the Dex Helm chart before deploying Harbor, and document the necessary DNS CNAME additions for dex.sudheeshbalakrishna.in.
+1. Log into Harbor Web UI via the **"Login via OIDC"** button.
+2. Click your username → **User Profile** → copy your **CLI Secret**.
+3. Log in from the terminal:
+   ```bash
+   docker login harbor.sudheeshbalakrishna.in -u <your-username>
+   # Paste CLI Secret as the password
+   ```
+4. Push images as normal:
+   ```bash
+   docker push harbor.sudheeshbalakrishna.in/<project>/<image>:<tag>
+   ```
 
-Verification Plan
-Manual Verification
-After the changes are applied, we will verify by doing the following:
+---
 
-DNS Validation: Ensure a CNAME record exists mapping dex.sudheeshbalakrishna.in to the NGINX Load Balancer.
-Dex Health Check: Navigate to https://dex.sudheeshbalakrishna.in/.well-known/openid-configuration in a browser and verify it returns a valid JSON OIDC configuration.
-End-to-end Login:
-Navigate to https://harbor.sudheeshbalakrishna.in.
-You should see a new button: LOGIN VIA OIDC PROVIDER.
-Click it, and you should be redirected to a Dex login page with a "Log in with GitHub" option.
-Click it, authorize the GitHub app, and it should redirect you successfully back to Harbor as an authenticated user.
+## 📄 License
+
+This project is licensed under the MIT License. See [LICENSE](./LICENSE) for details.

@@ -1,0 +1,44 @@
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  hosts:
+    - host: dex.sudheeshbalakrishna.in
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+  tls:
+    - secretName: dex-tls
+      hosts:
+        - dex.sudheeshbalakrishna.in
+
+config:
+  issuer: https://dex.sudheeshbalakrishna.in
+  storage:
+    type: kubernetes
+    config:
+      inCluster: true
+  
+  logger:
+    level: "debug"
+    format: "json"
+  
+  oauth2:
+    skipApprovalScreen: true
+  
+  connectors:
+  - type: github
+    id: github
+    name: GitHub
+    config:
+      clientID: "Ov23lixKTyssKFCiwJo5"
+      clientSecret: "cc0a7cfb6c848ba01c0b9679591771b45c38b32c"
+      redirectURI: https://dex.sudheeshbalakrishna.in/callback
+      
+  staticClients:
+  - id: harbor
+    redirectURIs:
+    - 'https://harbor.sudheeshbalakrishna.in/c/oidc/callback'
+    name: 'Harbor'
+    secret: harbor-dex-shared-secret
